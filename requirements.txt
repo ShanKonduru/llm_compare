@@ -3,4 +3,6 @@ dotenv
 pytest
 pytest-html
 streamlit
+pandas
+psutil
 

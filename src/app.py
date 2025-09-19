@@ -5,6 +5,33 @@ import streamlit as st
 import psutil
 import torch  # Only if you use CUDA
 
+import subprocess
+
+def get_local_models():
+    try:
+        result = subprocess.run(["ollama", "list"], capture_output=True, text=True)
+        models_output = result.stdout.strip().splitlines()
+
+        # Example output parsing:
+        # Assuming output looks like:
+        # model_name  size
+        # llama3:latest  4.9 GB
+        # llama2:latest  3.8 GB
+        # Parse accordingly:
+        models = []
+        for line in models_output:
+            parts = line.split()
+            if parts:
+                model_name = parts[0]
+                models.append(model_name)
+        return models
+    except Exception as e:
+        print(f"Error fetching models: {e}")
+        return []
+
+# Usage:
+models_list = get_local_models()
+
 def run_model_thread(model_name, prompt, results, index):
     """
     Runs a single Ollama model inference in a separate thread with additional metrics.
@@ -71,8 +98,8 @@ st.title("Enhanced LLM Performance Metrics Comparison with Ollama")
 # User input prompt
 prompt = st.text_area("Enter your prompt:", value="What is the capital of France?", height=150)
 
-models = ["llama3:latest", "llama2:latest", "gemma3:latest", "mistral:latest"]
-selected_models = st.multiselect("Select models to test:", options=models, default=["llama3:latest", "gemma3:latest"])
+models = models_list # ["llama3:latest", "llama2:latest", "gemma3:latest", "mistral:latest"]
+selected_models = st.multiselect("Select models to test:", options=models, default=models_list)
 
 if st.button("Run Tests", use_container_width=True):
     if not selected_models:

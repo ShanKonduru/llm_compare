@@ -6,5 +6,8 @@ streamlit
 pandas
 psutil
 ollama
-tourch
+torch
+pynvml
+nvidia-ml-py
+
 

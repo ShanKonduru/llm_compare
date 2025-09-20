@@ -4,186 +4,144 @@ import threading
 import time
 import streamlit as st
 import psutil
-import torch  # Only if you use CUDA
+import torch
 import pandas as pd
-
 import subprocess
 
-def get_local_models():
-    try:
-        result = subprocess.run(["ollama", "list"], capture_output=True, text=True)
-        models_output = result.stdout.strip().splitlines()
+# Define a global list to store model results
+model_results = []
+# Create a lock for thread-safe access to the results list
+results_lock = threading.Lock()
 
-        # Define keywords to include or exclude
+def get_local_models():
+    """Fetches a list of local Ollama models and handles potential errors."""
+    # Create a client instance, explicitly setting the host to the default Ollama address
+    client = ollama.Client(host='http://localhost:11434')
+    
+    try:
+        filtered_models = []
+        models_data = client.list()
+        
         include_keywords = ["llama", "chat", "gpt", "mistral", "gemma"]
         exclude_keywords = ["embed", "vector", "embedding"]
 
-        models = []
-        for line in models_output:
-            parts = line.split()
-            if parts:
-                model_name = parts[0]
+        for model in models_data.get('models', []):
+            model_name = model.get('model')
+            if model_name and isinstance(model_name, str):
                 name_lower = model_name.lower()
-                # Include if it contains any include_keyword AND does not contain exclude_keyword
-                if any(keyword in name_lower for keyword in include_keywords) and not any(keyword in name_lower for keyword in exclude_keywords):
-                    models.append(model_name)
-        return models
-    except Exception as e:
-        print(f"Error fetching models: {e}")
+                if any(keyword in name_lower for keyword in include_keywords) and \
+                   not any(keyword in name_lower for keyword in exclude_keywords):
+                    filtered_models.append(model_name)
+        return filtered_models
+    except ollama.ResponseError as e:
+        st.error(f"Failed to connect to Ollama: {e}")
         return []
 
-def get_all_local_models():
-    try:
-        result = subprocess.run(["ollama", "list"], capture_output=True, text=True)
-        models_output = result.stdout.strip().splitlines()
-
-        # Example output parsing:
-        # Assuming output looks like:
-        # model_name  size
-        # llama3:latest  4.9 GB
-        # llama2:latest  3.8 GB
-        # Parse accordingly:
-        models = []
-        for line in models_output:
-            parts = line.split()
-            if parts:
-                model_name = parts[0]
-                models.append(model_name)
-        return models
-    except Exception as e:
-        print(f"Error fetching models: {e}")
-        return []
-
-# Usage:
-models_list = get_local_models()
-
-# This function will be executed by each thread.
-# It uses the subprocess library to run a model and capture its output, including memory usage.
-def run_model_thread(model_name, prompt, results, index):
+def run_model_thread(model_name, prompt, thread_id):
     """
-    Runs a single Ollama model inference in a separate thread using subprocess.
-
-    This function captures both response time and memory usage from the command-line output.
+    Runs a single Ollama model, streams the response, and captures metrics.
     
-    Args:
-        model_name (str): The name of the Ollama model.
-        prompt (str): The prompt for the model.
-        results (list): A shared list to store the results from each thread.
-        index (int): The index in the results list to store this thread's output.
+    This function now uses the official Ollama Python client, which provides 
+    direct access to detailed metrics like total duration, load duration, and 
+    token counts from the API response, making it more reliable than
+    parsing stdout with regex.
     """
-    command = ["ollama", "run", model_name, "--verbose", prompt]
     try:
+        # Initial memory usage before the model run
+        process = psutil.Process()
+        initial_mem_mb = process.memory_info().rss / (1024 * 1024)
+
         start_time = time.time()
-        # Run the command and capture the output
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-        elapsed_time = time.time() - start_time
+        full_response = ""
         
-        # For debugging, print the raw stdout and stderr to the console
-        print(f"--- Raw Output for {model_name} ---")
-        print(f"STDOUT: {result.stdout}")
-        print(f"STDERR: {result.stderr}")
-        print("---------------------------------")
-        
-        output = result.stdout.strip()
-        
-        # Search for a memory usage pattern in both stdout and stderr
-        memory_usage = "N/A"
-        
-        # Check stderr first
-        if result.stderr:
-            memory_match = re.search(r"memory usage: (\d+\.?\d*)\s*(GB|MB)", result.stderr)
-            if memory_match:
-                value = float(memory_match.group(1))
-                unit = memory_match.group(2)
-                memory_usage = f"{value} {unit}"
+        stream = ollama.generate(
+            model=model_name,
+            prompt=prompt,
+            stream=True,
+            options={'temperature': 0.0}
+        )
 
-        # If not found in stderr, check stdout
-        if memory_usage == "N/A" and result.stdout:
-            memory_match = re.search(r"memory usage: (\d+\.?\d*)\s*(GB|MB)", result.stdout)
-            if memory_match:
-                value = float(memory_match.group(1))
-                unit = memory_match.group(2)
-                memory_usage = f"{value} {unit}"
-
-
-        results[index] = {
-            "model": model_name,
-            "response_time": round(elapsed_time, 2),
-            "memory_usage": memory_usage,
-            "response": output
-        }
-
-    except subprocess.CalledProcessError as e:
-        results[index] = {
-            "model": model_name,
-            "response_time": None,
-            "memory_usage": "Error",
-            "response": f"Command Error: {e.stderr}"
-        }
+        for chunk in stream:
+            full_response += chunk.get('response', '')
+            # Check for metrics at the end of the stream
+            if chunk.get('done', False):
+                metrics = chunk.get('metrics', {})
+                total_duration_ms = metrics.get('total_duration', 0)
+                load_duration_ms = metrics.get('load_duration', 0)
+                eval_count = metrics.get('eval_count', 0)
+                eval_duration_ms = metrics.get('eval_duration', 0)
+                
+                # Calculate tokens per second
+                tokens_per_sec = (eval_count / (eval_duration_ms / 1000)) if eval_duration_ms > 0 else 0
+                
+                # Final memory usage after the model run
+                final_mem_mb = process.memory_info().rss / (1024 * 1024)
+                
+                with results_lock:
+                    model_results.append({
+                        'Model': model_name,
+                        'Response': full_response,
+                        'Response Time': total_duration_ms / 1000,
+                        'Load Time': load_duration_ms / 1000,
+                        'Token Count': eval_count,
+                        'Tokens/Sec': tokens_per_sec,
+                        'Memory Usage (MB)': final_mem_mb - initial_mem_mb,
+                        # GPU memory is not directly available from the standard client, 
+                        # but you can add it if you're using a specific library like `gpustat`
+                        'GPU Memory Used (MB)': 'N/A'
+                    })
+                st.session_state[f'thread_{thread_id}_done'] = True
     except Exception as e:
-        results[index] = {
-            "model": model_name,
-            "response_time": None,
-            "memory_usage": "Error",
-            "response": f"Error: {e}"
-        }
+        st.error(f"Error running model {model_name}: {e}")
+        with results_lock:
+            model_results.append({
+                'Model': model_name,
+                'Response': 'Error',
+                'Response Time': 'N/A',
+                'Load Time': 'N/A',
+                'Token Count': 'N/A',
+                'Tokens/Sec': 'N/A',
+                'Memory Usage (MB)': 'N/A',
+                'GPU Memory Used (MB)': 'N/A'
+            })
+        st.session_state[f'thread_{thread_id}_done'] = True
 
-st.set_page_config(page_title="LLM Comparison", layout="wide")
+# Streamlit app layout
+st.title("Ollama Model Performance Benchmarking")
+st.markdown("This tool helps you benchmark the performance of different Ollama models on a given prompt.")
+st.set_page_config(layout="wide")
+# User inputs
+prompt = st.text_area("Enter a prompt:", "What is the capital of France?")
+st.markdown("---")
+models_list = get_local_models()
+if models_list:
+    selected_models = st.multiselect("Select models to test:", models_list, default=models_list)
+else:
+    st.warning("No local Ollama models found. Please ensure Ollama is running and you have models installed.")
+    selected_models = []
 
-st.title("LLM Response Time and Memory Comparison with Ollama")
+# Action button
+if st.button("Run Benchmark") and selected_models:
+    model_results.clear()
+    
+    threads = []
+    with st.spinner("Running models... Please wait."):
+        # Create and start a thread for each selected model
+        for i, model_name in enumerate(selected_models):
+            t = threading.Thread(
+                target=run_model_thread, 
+                args=(model_name, prompt, i)
+            )
+            threads.append(t)
+            t.start()
+            
+        # Wait for all threads to complete
+        for t in threads:
+            t.join()
 
-# UI for user input
-prompt = st.text_area(
-    "Enter your prompt:", 
-    value="What is the capital of France?", 
-    height=150
-)
-
-models = models_list
-selected_models = st.multiselect(
-    "Select models to test:", 
-    options=models, 
-    default=models_list
-)
-
-if st.button("Run Tests", use_container_width=True):
-    if not selected_models:
-        st.warning("Please select at least one model to test.")
-    else:
-        results = [None] * len(selected_models)
-        threads = []
-
-        # Use a spinner to indicate that the tests are running
-        with st.spinner("Running models... Please wait."):
-            # Create and start a thread for each selected model
-            for i, model_name in enumerate(selected_models):
-                t = threading.Thread(
-                    target=run_model_thread, 
-                    args=(model_name, prompt, results, i)
-                )
-                threads.append(t)
-                t.start()
-
-            # Wait for all threads to complete
-            for t in threads:
-                t.join()
-
-        # Display the results in a cleaner table format
-        st.write("### Results")
-        
-        headers = ["Model", "Response Time (s)", "Memory Usage", "Response"]
-        data = []
-        for res in results:
-            if res:
-                data.append([
-                    res['model'],
-                    f"{res['response_time']}s" if res['response_time'] is not None else "N/A",
-                    res['memory_usage'],
-                    res['response']
-                ])
-
-        # Create a pandas DataFrame to properly display the headers
-        df = pd.DataFrame(data, columns=headers)
-        st.dataframe(df, use_container_width=True)
-        
-        st.success("Tests complete!")
+    # Display results in a DataFrame
+    if model_results:
+        results_df = pd.DataFrame(model_results)
+        st.markdown("---")
+        st.subheader("Benchmark Results")
+        st.dataframe(results_df)

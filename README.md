@@ -44,6 +44,13 @@ pynvml: A Python wrapper for the NVIDIA Management Library (NVML), which is esse
 
 sys: A standard Python library used to handle system-specific parameters and functions, primarily used here for clean script termination in case of a critical error.
 
+## 
+
+While running this code run the following command to see actual mem usage
+```dos
+for /l %g in () do @(ollama ps & timeout /t 2)
+```
+
 ## Installation
 
 

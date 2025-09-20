@@ -14,17 +14,8 @@ import psutil
 import sys
 import pandas as pd
 import plotly.express as px
-
-# It's good practice to wrap pynvml imports in a try-except block
-# as it's specific to NVIDIA GPUs and might not be available.
-try:
-    import pynvml
-    PNVML_AVAILABLE = True
-except ImportError:
-    PNVML_AVAILABLE = False
-except Exception as e:
-    st.warning(f"Warning: pynvml could not be imported. GPU metrics will not be collected. Error: {e}")
-    PNVML_AVAILABLE = False
+import subprocess
+import re
 
 
 class OllamaMetrics:
@@ -34,50 +25,42 @@ class OllamaMetrics:
     @staticmethod
     def get_ollama_gpu_mem_usage() -> float:
         """
-        Finds the Ollama process and returns its GPU memory usage in MB.
-        Returns 0.0 if not found or on error.
+        Runs `ollama ps` and parses the output to get the estimated GPU memory usage in MB.
+        This is a more reliable method than using pynvml, as it directly
+        uses the information reported by the Ollama service itself.
         
-        This function requires pynvml and an NVIDIA GPU.
+        Returns 0.0 if not found or on error.
         """
-        if not PNVML_AVAILABLE:
-            return 0.0
-
         try:
-            pynvml.nvmlInit()
-            
-            # Get the PID of the Ollama process
-            ollama_process_pid = None
-            for proc in psutil.process_iter(['name', 'pid']):
-                if 'ollama' in proc.info['name'].lower():
-                    ollama_process_pid = proc.info['pid']
-                    break
-            
-            if not ollama_process_pid:
-                return 0.0
+            result = subprocess.run(['ollama', 'ps'], capture_output=True, text=True, check=True, timeout=5)
+            output = result.stdout
+            lines = output.strip().split('\n')
 
-            # Iterate through all GPU devices
-            device_count = pynvml.nvmlDeviceGetCount()
-            for i in range(device_count):
-                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                # Find the process on the GPU that matches the Ollama PID
-                for proc_info in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
-                    if proc_info.pid == ollama_process_pid:
-                        # Check if the memory usage is a valid number before dividing
-                        if proc_info.usedGpuMemory is not None:
-                            # Memory is in bytes, convert to MB
-                            return proc_info.usedGpuMemory / (1024 * 1024)
-                        else:
-                            return 0.0
+            # Look for the line that contains the running model
+            # This is a more robust approach to handle various output formats
+            for line in lines[1:]: # Skip the header line
+                # Check for a line that contains both a percentage and "CPU/GPU"
+                if 'CPU/GPU' in line:
+                    # Extract the GPU percentage
+                    gpu_match = re.search(r'(\d+)%/(\d+)% CPU/GPU', line)
+                    if gpu_match:
+                        gpu_percent = float(gpu_match.group(2))
+                        
+                        # Extract the model size
+                        size_match = re.search(r'(\d+\.?\d*)\s*GB', line)
+                        if size_match:
+                            size_value = float(size_match.group(1))
+                            model_size_mb = size_value * 1024
+
+                            # Calculate the estimated GPU usage in MB
+                            return (gpu_percent / 100) * model_size_mb
             
-        except pynvml.NVMLError as e:
-            st.error(f"pynvml error: {e}")
-            return 0.0
+        except FileNotFoundError:
+            st.error("The 'ollama' command was not found. Please ensure Ollama is installed and in your system's PATH.")
+        except subprocess.TimeoutExpired:
+            st.error("The 'ollama ps' command timed out.")
         except Exception as e:
-            st.error(f"An unexpected error occurred in get_ollama_gpu_mem_usage: {e}")
-            return 0.0
-        finally:
-            if PNVML_AVAILABLE:
-                pynvml.nvmlShutdown()
+            st.error(f"An unexpected error occurred while parsing 'ollama ps' output: {e}")
 
         return 0.0
 
@@ -227,7 +210,7 @@ def main():
 
     st.markdown("---")
     
-    if st.button("Generate Performance Metrics", type="primary", use_container_width=True):
+    if st.button("Generate Performance Metrics", type="primary", width='content'):
         if not selected_models:
             st.error("Please select at least one model to benchmark.")
             return
@@ -252,7 +235,7 @@ def main():
             avg_metrics_df = results_df.groupby('Model').mean().reset_index()
 
             st.subheader("Average Metrics by Model")
-            st.dataframe(avg_metrics_df, use_container_width=True)
+            st.dataframe(avg_metrics_df, width='content')
 
             st.subheader("Graphical Representation")
             
@@ -268,20 +251,19 @@ def main():
                     labels={'total_duration_s': 'Time (seconds)'},
                     color='Model'
                 )
-                st.plotly_chart(fig_total_duration, use_container_width=True)
+                st.plotly_chart(fig_total_duration, width='content')
 
                 # Bar chart for GPU Memory Usage
-                if PNVML_AVAILABLE:
-                    st.write("#### Average GPU Memory Usage")
-                    fig_gpu_mem = px.bar(
-                        avg_metrics_df,
-                        x='Model',
-                        y='gpu_mem_used_mb',
-                        title='Average GPU Memory Used per Model',
-                        labels={'gpu_mem_used_mb': 'Memory (MB)'},
-                        color='Model'
-                    )
-                    st.plotly_chart(fig_gpu_mem, use_container_width=True)
+                st.write("#### Average GPU Memory Usage")
+                fig_gpu_mem = px.bar(
+                    avg_metrics_df,
+                    x='Model',
+                    y='gpu_mem_used_mb',
+                    title='Average GPU Memory Used per Model',
+                    labels={'gpu_mem_used_mb': 'Memory (MB)'},
+                    color='Model'
+                )
+                st.plotly_chart(fig_gpu_mem, width='content')
 
                 # Bar chart for RAM Usage
                 st.write("#### Average RAM Usage")

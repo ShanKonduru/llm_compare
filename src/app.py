@@ -62,8 +62,12 @@ class OllamaMetrics:
                 # Find the process on the GPU that matches the Ollama PID
                 for proc_info in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
                     if proc_info.pid == ollama_process_pid:
-                        # Memory is in bytes, convert to MB
-                        return proc_info.usedGpuMemory / (1024 * 1024)
+                        # Check if the memory usage is a valid number before dividing
+                        if proc_info.usedGpuMemory is not None:
+                            # Memory is in bytes, convert to MB
+                            return proc_info.usedGpuMemory / (1024 * 1024)
+                        else:
+                            return 0.0
             
         except pynvml.NVMLError as e:
             st.error(f"pynvml error: {e}")
@@ -101,7 +105,9 @@ class OllamaLLMBenchmark:
         """
         try:
             models = _self.client.list()['models']
-            return [model['model'] for model in models]
+            # Filter out embedding models, which are not designed for chat.
+            # We check the family and also the model name for common keywords.
+            return [model['model'] for model in models if model['details']['family'] != 'text-embedding' and 'embed' not in model['model']]
         except Exception as e:
             st.error(f"Error getting list of local models. Error: {e}")
             return []

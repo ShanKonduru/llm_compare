@@ -9,5 +9,6 @@ ollama
 torch
 pynvml
 nvidia-ml-py
-
+plotly
+pandas
 

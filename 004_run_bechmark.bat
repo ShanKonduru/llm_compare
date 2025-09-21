@@ -1,2 +1,2 @@
 @echo off
-python perf_bench_mark.py
+python mains\\perf_bench_mark.py

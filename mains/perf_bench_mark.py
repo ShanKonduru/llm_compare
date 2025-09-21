@@ -1,4 +1,8 @@
 # --- Main Execution Block ---
+import os
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from src.ollama_llm_benchmark import OllamaLLMBenchmark
 
 if __name__ == "__main__":
@@ -18,4 +22,4 @@ if __name__ == "__main__":
     ]
 
     benchmark_runner = OllamaLLMBenchmark()
-    benchmark_runner.run_benchmark(prompts_to_test)
+    benchmark_runner.run_benchmark(model_names=benchmark_runner._get_local_llms(), prompts=prompts_to_test)
